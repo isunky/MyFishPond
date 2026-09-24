@@ -124,8 +124,8 @@ async function startPond() {
   app.canvas.addEventListener('pointerdown', onPointerDown, { passive: true });
 
   app.ticker.add((ticker) => {
-    scene.updateWater(ticker.deltaMS, settings.waterMotion, settings.caustics);
     simulation.update(ticker.deltaMS, ticker);
+    scene.updateWater(ticker.deltaMS, settings.waterMotion, settings.caustics);
     elapsedSampleMs += ticker.deltaMS;
     frameSamples += 1;
     if (elapsedSampleMs >= 500) {
