@@ -38,6 +38,8 @@ float noise(vec2 p) {
 }
 
 vec2 surfaceSlope(vec2 p) {
+    // Broad, slow gusts interrupt the otherwise regular wave repetition.
+    p += vec2(sin(p.y * 2.1 + uTime * 0.045), cos(p.x * 1.7 - uTime * 0.038)) * 0.11;
     return vec2(0.66, 0.75) * cos(dot(p, vec2(18, 21)) + uTime * 0.78) * 0.46
          + vec2(-0.94, 0.34) * cos(dot(p, vec2(-31, 11)) - uTime * 0.57) * 0.28
          + vec2(0.36, -0.93) * cos(dot(p, vec2(43, -37)) + uTime * 0.93) * 0.16
@@ -51,7 +53,8 @@ vec2 rippleSlope(vec4 ripple, vec2 p, vec2 aspect) {
     float front = d - ripple.z * 0.14;
     float width = 0.018 + ripple.z * 0.009;
     float envelope = exp(-front * front / (width * width));
-    float fade = exp(-ripple.z * 0.9) * smoothstep(0.0, 0.14, ripple.z);
+    float fade = exp(-ripple.z * 0.9) * smoothstep(0.0, 0.14, ripple.z)
+               * (1.0 - smoothstep(2.7, 3.6, ripple.z));
     float carrier = cos(front * 235.0) * envelope;
     return delta / max(d, 0.001) * carrier * fade * ripple.w * 2.5;
 }
@@ -95,12 +98,12 @@ void main() {
     // Weak sky reflection varies with the surface normal, above the submerged fish.
     vec3 normal = normalize(vec3(-slope * 0.24, 1.0));
     float fresnel = 0.018 + pow(1.0 - normal.z, 2.0) * 0.45;
-    float cloud = noise(p * 3.2 + vec2(uTime * 0.012, -uTime * 0.007));
+    float cloud = noise(p * 2.2 + vec2(uTime * 0.009, -uTime * 0.006));
     vec3 sky = mix(vec3(0.30, 0.48, 0.48), vec3(0.79, 0.88, 0.85), cloud);
     color.rgb = mix(color.rgb, vec3(0.055, 0.29, 0.27) * color.a, water * 0.035);
     color.rgb = mix(color.rgb, sky * color.a, water * (fresnel + cloud * 0.035));
     float sun = pow(max(dot(normal, normalize(vec3(-0.24, -0.32, 1.0))), 0.0), 100.0);
-    float specular = sun * 0.035 * uMotion;
+    float specular = sun * (0.015 + cloud * 0.032) * uMotion;
 
     vec2 q = p * 28.0 + ambient * 0.28;
     q += vec2(sin(q.y * 0.39 + uTime * 0.22), sin(q.x * 0.31 - uTime * 0.17));
@@ -116,6 +119,7 @@ void main() {
 
 interface Ripple { x: number; y: number; age: number; strength: number }
 interface WakeFish { x: number; y: number; heading: number; depth: number; currentSpeed: number; baseSpeed: number }
+interface WakeSlot { fish?: WakeFish; strength: number; x: number; y: number; heading: number }
 
 export class PondWaterSurface {
   readonly filter: Filter;
@@ -126,6 +130,7 @@ export class PondWaterSurface {
   private time = 0;
   private motionStrength = 0.85;
   private causticsStrength = 0.66;
+  private readonly wakes: WakeSlot[] = Array.from({ length: WAKE_COUNT }, () => ({ strength: 0, x: 0, y: 0, heading: 0 }));
 
   constructor(private readonly background: Texture) {
     const resources: Record<string, { value: number | Float32Array; type: string }> = {
@@ -191,14 +196,37 @@ export class PondWaterSurface {
       }
       (uniforms[`uRipple${i}`] as Float32Array).set([ripple.x, ripple.y, ripple.age, ripple.strength]);
     }
-    // Stable selection prevents trails jumping between fish as their depths change.
+    // Keep each swimmer's slot until its trail has faded; all shallow fish are eligible.
     for (let i = 0; i < WAKE_COUNT; i++) {
-      const swimmer = fish[i];
+      const wake = this.wakes[i]!;
+      if (!wake.fish) {
+        let best: WakeFish | undefined;
+        let bestStrength = 0.025;
+        for (const candidate of fish) {
+          if (this.wakes.some((slot) => slot.fish === candidate)) continue;
+          const strength = wakeStrength(candidate);
+          if (strength > bestStrength) { best = candidate; bestStrength = strength; }
+        }
+        if (best) {
+          wake.fish = best;
+          wake.x = best.x;
+          wake.y = best.y;
+          wake.heading = best.heading;
+        }
+      }
+      const swimmer = wake.fish;
+      const present = swimmer !== undefined && fish.includes(swimmer);
+      const target = present ? wakeStrength(swimmer) : 0;
+      wake.strength += (target - wake.strength) * (1 - Math.exp(-deltaSeconds * 2.8));
+      if (present) {
+        wake.x = swimmer.x;
+        wake.y = swimmer.y;
+        const turn = Math.atan2(Math.sin(swimmer.heading - wake.heading), Math.cos(swimmer.heading - wake.heading));
+        wake.heading += turn * (1 - Math.exp(-deltaSeconds * 4));
+      }
       const data = uniforms[`uWake${i}`] as Float32Array;
-      if (!swimmer) { data.fill(0); continue; }
-      const surface = Math.max(0, 1 - swimmer.depth / 0.55);
-      data.set([swimmer.x / this.width, swimmer.y / this.height, swimmer.heading,
-        surface * Math.min(1, swimmer.currentSpeed / swimmer.baseSpeed) * 0.38]);
+      data.set([wake.x / this.width, wake.y / this.height, wake.heading, wake.strength]);
+      if (target < 0.006 && wake.strength < 0.008) wake.fish = undefined;
     }
   }
 
@@ -214,4 +242,10 @@ export class PondWaterSurface {
     this.releaseInput();
     this.filter.destroy();
   }
+}
+
+function wakeStrength(fish: WakeFish) {
+  const surface = Math.max(0, 1 - fish.depth / 0.55);
+  const effort = Math.max(0, Math.min(1.4, fish.currentSpeed / fish.baseSpeed) - 0.45);
+  return surface * effort * 0.5;
 }

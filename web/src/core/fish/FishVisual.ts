@@ -1,8 +1,26 @@
-import { AnimatedSprite, Container, Graphics, Mesh, MeshPlane, Rectangle, Sprite, type Renderer, type Texture } from 'pixi.js';
+import { AnimatedSprite, compileHighShaderGlProgram, Container, Graphics, localUniformBitGl, Mesh, MeshPlane, Rectangle, roundPixelsBitGl, Shader, Sprite, type Renderer, type Texture } from 'pixi.js';
 import { drawFishMarkings, type FishDefinition } from './FishPattern';
 
 const COLUMNS = 17;
 const ROWS = 5;
+
+const fishProgram = compileHighShaderGlProgram({
+  name: 'fish-frame-blend',
+  bits: [localUniformBitGl, roundPixelsBitGl, {
+    name: 'fish-frame-blend',
+    fragment: {
+      header: `uniform sampler2D uFrameA;
+        uniform sampler2D uFrameB;
+        uniform float uFrameBlend;`,
+      main: `
+        // Both inputs are premultiplied: blend once without stacking translucent fins.
+        outColor = mix(texture(uFrameA, vUV), texture(uFrameB, vUV), uFrameBlend);
+        float edge = abs(vUV.y - 0.5) * 2.0;
+        outColor.rgb *= 1.025 - 0.085 * edge * edge;
+      `,
+    },
+  }],
+});
 
 /** Bake the portable markings once; deform skin, markings and shadow on the same spine. */
 export class FishVisual {
@@ -11,6 +29,8 @@ export class FishVisual {
   readonly shadow: Mesh;
   private readonly body: MeshPlane;
   private readonly frames: Texture[];
+  private readonly shader: Shader & { texture: Texture };
+  private frameCursor: number;
 
   constructor(
     renderer: Renderer, definition: FishDefinition, textures: Texture[],
@@ -40,13 +60,32 @@ export class FishVisual {
     });
     source.destroy({ children: true });
     this.animation = new AnimatedSprite({ textures: this.frames, animationSpeed, autoUpdate: false });
-    this.animation.gotoAndPlay(initialFrame);
-    this.body = new MeshPlane({ texture: this.animation.texture, verticesX: COLUMNS, verticesY: ROWS });
+    this.frameCursor = initialFrame;
+    this.animation.gotoAndStop(initialFrame);
+    this.shader = Object.assign(new Shader({
+      glProgram: fishProgram,
+      resources: {
+        uFrameA: this.frames[initialFrame]!.source,
+        uFrameB: this.frames[(initialFrame + 1) % this.frames.length]!.source,
+        fishUniforms: { uFrameBlend: { value: 0, type: 'f32' } },
+      },
+    }), { texture: this.animation.texture });
+    this.body = new MeshPlane({ texture: this.animation.texture, shader: this.shader, verticesX: COLUMNS, verticesY: ROWS });
     this.body.autoResize = false;
-    this.shadow = new Mesh({ geometry: this.body.geometry, texture: this.animation.texture });
+    this.shadow = new Mesh({ geometry: this.body.geometry, texture: this.animation.texture, shader: this.shader });
     this.shadow.tint = 0x082f32;
     this.root.addChild(this.body);
     this.update(0, 0, 1, 0.4);
+  }
+
+  advance(deltaSeconds: number) {
+    this.frameCursor = (this.frameCursor + this.animation.animationSpeed * 60 * deltaSeconds) % this.frames.length;
+    const frame = Math.floor(this.frameCursor);
+    const blend = this.frameCursor - frame;
+    this.animation.gotoAndStop(frame);
+    this.shader.resources.uFrameA = this.frames[frame]!.source;
+    this.shader.resources.uFrameB = this.frames[(frame + 1) % this.frames.length]!.source;
+    this.shader.resources.fishUniforms.uniforms.uFrameBlend = blend * blend * (3 - 2 * blend);
   }
 
   update(phase: number, turn: number, speedRatio: number, depth: number) {
@@ -84,6 +123,7 @@ export class FishVisual {
     this.root.destroy({ children: true });
     this.shadow.destroy();
     this.animation.destroy();
+    this.shader.destroy();
     geometry.destroy();
     for (const frame of this.frames) frame.destroy(true);
   }

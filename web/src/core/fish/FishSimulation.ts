@@ -1,5 +1,4 @@
 import type { QualityProfile } from '../../config/defaults';
-import type { Ticker } from 'pixi.js';
 import { SpatialGrid } from '../boids/SpatialGrid';
 import { FishEntity } from './FishEntity';
 
@@ -22,7 +21,7 @@ export class FishSimulation {
     private readonly random: () => number,
   ) {}
 
-  update(deltaMs: number, ticker: Ticker) {
+  update(deltaMs: number) {
     const deltaSeconds = Math.min(0.05, Math.max(0, deltaMs / 1_000));
     this.simulationTime += deltaSeconds;
     this.boidsAccumulator += deltaSeconds;
@@ -42,8 +41,10 @@ export class FishSimulation {
       this.updateBehaviorDecisions();
     }
 
+    const bounds = this.getBounds();
+    const speed = this.settings().fishSpeed;
     for (const fish of this.fish) {
-      fish.update(deltaSeconds, this.getBounds(), this.settings().fishSpeed, ticker);
+      fish.update(deltaSeconds, bounds, speed);
     }
   }
 
@@ -59,6 +60,7 @@ export class FishSimulation {
     this.grid.rebuild(this.fish);
     const { width, height } = this.getBounds();
     const margin = Math.min(130, Math.min(width, height) * 0.18);
+    const schooling = profileSchooling(this.settings().schooling);
 
     for (const fish of this.fish) {
       let separationX = 0;
@@ -76,30 +78,33 @@ export class FishSimulation {
         const dy = other.y - fish.y;
         const distanceSquared = dx * dx + dy * dy;
         if (distanceSquared > 110 * 110) continue;
-        neighborCount += 1;
-        alignmentX += Math.cos(other.heading);
-        alignmentY += Math.sin(other.heading);
-        cohesionX += other.x;
-        cohesionY += other.y;
-        if (distanceSquared < 44 * 44) {
-          const distance = Math.max(1, Math.sqrt(distanceSquared));
-          separationX -= dx / distance;
-          separationY -= dy / distance;
+        const distance = Math.max(1, Math.sqrt(distanceSquared));
+        const ahead = (dx * Math.cos(fish.heading) + dy * Math.sin(fish.heading)) / distance;
+        const weight = (1 - distance / 110) * (ahead > -0.3 ? 1 : 0.25);
+        neighborCount += weight;
+        alignmentX += Math.cos(other.heading) * weight;
+        alignmentY += Math.sin(other.heading) * weight;
+        cohesionX += other.x * weight;
+        cohesionY += other.y * weight;
+        if (distanceSquared < 50 * 50 && Math.abs(other.depth - fish.depth) < 0.3) {
+          const pressure = (1 - distance / 50) ** 2;
+          separationX -= dx / distance * pressure;
+          separationY -= dy / distance * pressure;
           separationCount += 1;
         }
       }
 
-      let steerX = Math.cos(fish.desiredHeading) * 0.35;
-      let steerY = Math.sin(fish.desiredHeading) * 0.35;
+      let steerX = Math.cos(fish.preferredHeading) * 0.48;
+      let steerY = Math.sin(fish.preferredHeading) * 0.48;
       if (neighborCount > 0) {
-        steerX += (alignmentX / neighborCount) * 0.25;
-        steerY += (alignmentY / neighborCount) * 0.25;
-        steerX += ((cohesionX / neighborCount - fish.x) / 110) * profileSchooling(this.settings().schooling) * 0.16;
-        steerY += ((cohesionY / neighborCount - fish.y) / 110) * profileSchooling(this.settings().schooling) * 0.16;
+        steerX += (alignmentX / neighborCount) * schooling * 0.27;
+        steerY += (alignmentY / neighborCount) * schooling * 0.27;
+        steerX += ((cohesionX / neighborCount - fish.x) / 110) * schooling * 0.12;
+        steerY += ((cohesionY / neighborCount - fish.y) / 110) * schooling * 0.12;
       }
       if (separationCount > 0) {
-        steerX += (separationX / separationCount) * 0.9;
-        steerY += (separationY / separationCount) * 0.9;
+        steerX += separationX * 1.4;
+        steerY += separationY * 1.4;
       }
 
       const edgeForce = (distance: number, positive: boolean) => {
@@ -107,8 +112,11 @@ export class FishSimulation {
         const force = (1 - Math.max(0, distance) / Math.max(1, margin)) ** 2;
         return positive ? force : -force;
       };
-      steerX += edgeForce(fish.x, true) + edgeForce(width - fish.x, false);
-      steerY += edgeForce(fish.y, true) + edgeForce(height - fish.y, false);
+      const lookAhead = fish.currentSpeed * this.settings().fishSpeed * 1.2;
+      const nextX = fish.x + Math.cos(fish.heading) * lookAhead;
+      const nextY = fish.y + Math.sin(fish.heading) * lookAhead;
+      steerX += edgeForce(nextX, true) + edgeForce(width - nextX, false);
+      steerY += edgeForce(nextY, true) + edgeForce(height - nextY, false);
       fish.applySteering(
         Math.atan2(steerY, steerX),
         separationCount > 0 ? 3.2 : 2.2,
@@ -131,7 +139,8 @@ export class FishSimulation {
             nearby.reduce((sum, other) => sum + Math.cos(other.heading), 0),
           )
         : fish.heading;
-      fish.beginDecision(this.simulationTime, this.random, schoolHeading, nearby.length >= 2);
+      fish.beginDecision(this.simulationTime, this.random, schoolHeading,
+        nearby.length >= 2 && this.settings().schooling > 0.2);
     }
   }
 }

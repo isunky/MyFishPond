@@ -1,4 +1,4 @@
-import type { AnimatedSprite, Container, Mesh, Renderer, Texture, Ticker } from 'pixi.js';
+import type { AnimatedSprite, Container, Mesh, Renderer, Texture } from 'pixi.js';
 import type { FishDefinition } from './FishPattern';
 import { FishVisual } from './FishVisual';
 
@@ -21,6 +21,7 @@ export class FishEntity {
   y = 0;
   heading = 0;
   desiredHeading = 0;
+  preferredHeading = 0;
   currentSpeed = 0;
   behavior: FishBehavior = 'wander';
   private nextWanderAt = 0;
@@ -56,6 +57,7 @@ export class FishEntity {
     this.nextBurstAt = 2 + random() * 4;
     this.heading = random() * Math.PI * 2;
     this.desiredHeading = this.heading;
+    this.preferredHeading = this.heading;
     this.baseAnimationSpeed = 0.12 + random() * 0.02;
     const fishLength = (this.species === 'koi' ? 72 : 60) * 0.88 * scale * (0.9 + random() * 0.2);
     this.visual = new FishVisual(renderer, definition, textures, fishLength, this.baseAnimationSpeed, Math.floor(random() * textures.length));
@@ -70,7 +72,7 @@ export class FishEntity {
 
   beginDecision(now: number, random: () => number, heading: number, school: boolean) {
     if (now >= this.nextWanderAt && this.behavior !== 'school') {
-      this.desiredHeading += (random() - 0.5) * 1.1;
+      this.preferredHeading = this.heading + (random() - 0.5) * 1.1;
       this.nextWanderAt = now + 1.2 + random() * 2.6;
       this.behavior = random() > 0.65 ? 'cruise' : 'wander';
       this.speedIntent = this.behavior === 'cruise'
@@ -80,7 +82,7 @@ export class FishEntity {
     }
     if (school && this.schoolAffinity > 0.65) {
       if (this.behavior !== 'school') this.speedIntent = 0.84 + random() * 0.16;
-      this.desiredHeading = blendAngle(this.desiredHeading, heading, 0.18);
+      this.preferredHeading = blendAngle(this.preferredHeading, heading, 0.12);
       this.behavior = 'school';
       this.stateUntil = now + 1.1;
     } else if (now > this.stateUntil && this.behavior === 'school') {
@@ -105,7 +107,7 @@ export class FishEntity {
     this.desiredHeading = blendAngle(this.desiredHeading, angle, blend);
   }
 
-  update(deltaSeconds: number, bounds: { width: number; height: number }, speedScale: number, ticker: Ticker) {
+  update(deltaSeconds: number, bounds: { width: number; height: number }, speedScale: number) {
     this.speedClock += deltaSeconds;
     const previousSpeedRatio = this.currentSpeed / this.baseSpeed;
     const tailRate = Math.max(0.72, Math.min(1.5, 0.68 + previousSpeedRatio * 0.42));
@@ -146,7 +148,7 @@ export class FishEntity {
     const speedRatio = this.currentSpeed / this.baseSpeed;
     const animationRate = Math.max(0.72, Math.min(1.5, 0.68 + speedRatio * 0.42));
     this.animation.animationSpeed = this.baseAnimationSpeed * animationRate;
-    this.animation.update(ticker);
+    this.visual.advance(deltaSeconds);
     this.depth = this.baseDepth + Math.sin(this.speedClock * 0.23 + this.speedPhase) * 0.09;
     this.visual.update(this.swimClock + this.swimPhase, this.angularVelocity, speedRatio, this.depth);
     this.sprite.zIndex = -this.depth;
